@@ -29,7 +29,7 @@ sched_yield(void)
 	// below to switch to this CPU's idle environment.
 
 	// LAB 4: Your code here.
-	uint32_t envid = thiscpu->cpu_env ? ENVX(thiscpu->cpu_env->env_id) : 0;
+	uint32_t envid = curenv ? ENVX(curenv->env_id) : 0;
 	uint32_t first_eid = (++envid) % NENV;
 	uint32_t next_envid;
 

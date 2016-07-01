@@ -25,12 +25,12 @@ pgfault(struct UTrapframe *utf)
 	//   (see <inc/memlayout.h>).
 
 	// LAB 4: Your code here.
-	// in user spance, you can only use vpt
-	pte_t pte = vpt[PGNUM((uint32_t)addr)];
-
-	if (!(err & FEC_WR)) {
+	if ((err & FEC_WR) == 0) {
 		panic("Denied write 0x%x: err %x\n\n", (uint32_t) addr, err);
 	}
+
+	// in user spance, you can only use vpt
+	pte_t pte = vpt[PGNUM((uint32_t)addr)];
 	if (!(pte & PTE_COW)) {
 		panic("Denied copy-on-write 0x%x, env_id 0x%x\n", (uint32_t) addr, thisenv->env_id);
 	}
@@ -50,7 +50,8 @@ pgfault(struct UTrapframe *utf)
 
 	memmove((void *)PFTEMP, tmpva, PGSIZE);
 
-	if ((r = sys_page_map(0, (void *)PFTEMP, 0, tmpva, PTE_P|PTE_W|PTE_U)) < 0)
+	if ((r = sys_page_map(0, (void *)PFTEMP, 0, tmpva, 
+		PTE_P|PTE_W|PTE_U)) < 0)
 		panic("sys_page_map: error %e\n", r);
 
 }
@@ -125,6 +126,8 @@ envid_t
 fork(void)
 {
 	// LAB 4: Your code here.
+	extern void _pgfault_upcall(void);
+	envid_t myenvid = sys_getenvid();
 	envid_t envid;
 	int r;
 	set_pgfault_handler(pgfault);
@@ -143,21 +146,43 @@ fork(void)
 		if (vpd[i] & PTE_P) {
 			for (j = 0; j < NPTENTRIES; j++) {
 				pn = i* NPTENTRIES + j;
-				if (pn != PGNUM(UXSTACKTOP - PGSIZE)) {
+				if (pn == PGNUM(UXSTACKTOP - PGSIZE)) {
+					break;
+				}
+				
+				if (vpt[pn] & PTE_P) {
 					duppage(envid, pn);
 				}
 			}
 		}
 	}
 
-	if ((r = sys_env_set_pgfault_upcall(envid, thisenv->env_pgfault_upcall)) < 0)
-		panic("sys_env_set_pgfault_upcall: error %e\n", r);
-
+	// Allocate new exception stack for child	
 	if ((r = sys_page_alloc(envid, (void*)(UXSTACKTOP-PGSIZE), PTE_P | PTE_U | PTE_W)) < 0)
 		panic("sys_page_alloc: error %e\n", r);
 
-	if ((r = sys_env_set_status(envid, ENV_RUNNABLE)) < 0)
-		panic("sys_env_set_status: error %e\n", r);
+	// Map child uxstack to temp page 
+	if (sys_page_map(envid, (void *) (UXSTACKTOP - PGSIZE), myenvid, PFTEMP, 
+			PTE_U | PTE_P | PTE_W) < 0) {
+		return -1;
+	}
+
+	// Copy own uxstack to temp page
+	memmove((void *)(UXSTACKTOP - PGSIZE), PFTEMP, PGSIZE);
+
+	// Unmap temp page
+	if (sys_page_unmap(myenvid, PFTEMP) < 0) {
+		return -1;
+	}	
+
+	if ((r = sys_env_set_pgfault_upcall(envid, thisenv->env_pgfault_upcall)) < 0)
+		panic("sys_env_set_pgfault_upcall: error %e\n", r);
+
+	if ((r = sys_env_set_status(envid, ENV_RUNNABLE)) < 0) {
+		cprintf("sys_env_set_status: error %e\n", r);
+		return -1;
+	}
+
 
 	return envid;
 }

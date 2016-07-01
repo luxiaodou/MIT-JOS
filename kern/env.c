@@ -220,8 +220,13 @@ env_setup_vm(struct Env *e)
 	e->env_pgdir = page2kva(p);
 	// Question: why need to memmove ? 
 	// equal to copy_to_user
-	memmove(e->env_pgdir, kern_pgdir, PGSIZE);
+	// memmove(e->env_pgdir, kern_pgdir, PGSIZE);
+	memset(e->env_pgdir, 0x0, PGSIZE); // clear pgdir
 	p->pp_ref++;
+
+	for (i = PDX(UTOP); i < NPDENTRIES; i++) {
+		e->env_pgdir[i] = kern_pgdir[i];
+	}
 
 	// UVPT maps the env's own page table read-only.
 	// Permissions: kernel R, user R
@@ -322,13 +327,18 @@ region_alloc(struct Env *e, void *va, size_t len)
 	//   'va' and 'len' values that are not page-aligned.
 	//   You should round va down, and round (va + len) up.
 	//   (Watch out for corner-cases!)
-	struct Page *page;
-	uint32_t i;
-	for (i = ROUNDDOWN((uint32_t) va, PGSIZE) ;
-		       i < ROUNDUP((uint32_t) va + len, PGSIZE); i+=PGSIZE) {
-		page = page_alloc(0);
-		page_insert(e->env_pgdir, page, (void *) i, PTE_U | PTE_W | PTE_P);
 
+	uintptr_t start = (uintptr_t) ROUNDDOWN(va, PGSIZE);
+	uintptr_t end = (uintptr_t) ROUNDUP(va + len, PGSIZE);
+
+	for (; start < end; start += PGSIZE) {
+		struct Page *page = page_alloc(0);
+		if (!page) {
+			panic("page_alloc(0) failed");
+		} else {
+			if (page_insert(e->env_pgdir, page, (void *) start, PTE_U | PTE_W) == -E_NO_MEM) 
+				panic("page_insert: failed to alloc at %p of len %x\n", va, len);
+		}
 	}
 }
 
@@ -573,21 +583,23 @@ env_run(struct Env *e)
 	// LAB 3: Your code here.
 	// env_status : ENV_FREE, ENV_RUNNABLE, ENV_RUNNING, ENV_NOT_RUNNABLE
 
-	if (curenv && curenv->env_status == ENV_RUNNING)
-		curenv->env_status = ENV_RUNNABLE;
+	if (curenv == NULL 
+		|| curenv->env_id != e->env_id) {
+		if (curenv && curenv->env_status == ENV_RUNNING)
+			curenv->env_status = ENV_RUNNABLE;
 
-	curenv = e;
-	// apply cpunum with env structure
-	e->env_cpunum = cpunum();
-
-	e->env_status = ENV_RUNNING;
-	e->env_runs++;
+		curenv = e;
+		// apply cpunum with env structure
+		e->env_cpunum = cpunum();
+		e->env_status = ENV_RUNNING;
+		e->env_runs++;
+		lcr3(PADDR(e->env_pgdir));
+	}
 
 	//DEBUG cprintf("before unlock, env_run() with cpu %d\n", e->env_cpunum);
 	unlock_kernel();
 	//DEBUGING cprintf("unlock\n");
 
-	lcr3(PADDR(e->env_pgdir));
 	// not work if unlock_kernel here
 	//DEBUGING cprintf("after lcr3\n");
 	env_pop_tf(&(e->env_tf));

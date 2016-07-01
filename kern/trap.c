@@ -14,6 +14,7 @@
 #include <kern/picirq.h>
 #include <kern/cpu.h>
 #include <kern/spinlock.h>
+#include <kern/time.h>
 
 static struct Taskstate ts;
 
@@ -226,7 +227,12 @@ trap_dispatch(struct Trapframe *tf)
 	    return;	
     };
 
+	// Add time tick increment to clock interrupts.
+	// Be careful! In multiprocessors, clock interrupts are
+	// triggered on every CPU.
+	// LAB 6: Your code here.
 	if (tf->tf_trapno == IRQ_OFFSET + IRQ_TIMER) {
+		time_tick();
 		lapic_eoi();
 		sched_yield();
         return;
@@ -308,9 +314,9 @@ page_fault_handler(struct Trapframe *tf)
 	// Handle kernel-mode page faults.
 
 	// LAB 3: Your code here.
-	if ((tf->tf_cs & 0x1) == 0) {
+	if (tf->tf_cs == GD_KT) {
 	      print_trapframe(tf);
-	      panic("Kernel page fault");
+	      panic("kernel page fault va %08x\n", fault_va);
 	}
 
 	// We've already handled kernel-mode exceptions, so if we get here,
@@ -345,46 +351,50 @@ page_fault_handler(struct Trapframe *tf)
 	//   (the 'tf' variable points at 'curenv->env_tf').
 
 	// LAB 4: Your code here.
-	if (!curenv->env_pgfault_upcall)
+	if (!curenv->env_pgfault_upcall) {
+		cprintf("[%08x] user fault by no env_pgfault_upcall\n", curenv->env_id);
 		goto userfault;
-
-	if (USTACKTOP < tf->tf_esp && tf->tf_esp < UXSTACKTOP - PGSIZE)
-		goto userfault;
-
-	{
-		void *dststack;
-		// reference: inc/trap.h: 59 ~ 86
-		struct UTrapframe utf;
-		utf.utf_fault_va = fault_va;
-		utf.utf_err = tf->tf_err;
-		utf.utf_regs = tf->tf_regs;
-		utf.utf_eip = tf->tf_eip;
-		utf.utf_eflags = tf->tf_eflags;
-		utf.utf_esp = tf->tf_esp;
-
-		if (UXSTACKTOP - PGSIZE <= tf->tf_esp
-		    && tf->tf_esp <= UXSTACKTOP - 1) {
-			dststack = (void *)(tf->tf_esp - sizeof(struct UTrapframe) - 4);
-		} else {
-			dststack = (void *)(UXSTACKTOP - sizeof(struct UTrapframe));
-		}
-
-		user_mem_assert(curenv, dststack, sizeof(struct UTrapframe), PTE_P | PTE_W | PTE_U);
-		memmove(dststack, (void *)&utf, sizeof(struct UTrapframe));
-		tf->tf_eip = (uint32_t) curenv->env_pgfault_upcall;
-		tf->tf_esp = (uint32_t) dststack;
-
-		env_run(curenv);
-		
 	}
+
+	user_mem_assert(curenv,(void *)(UXSTACKTOP -4), 4, 0);
+
+	uintptr_t exstack;
+	struct UTrapframe *utf;
+	
+	// Figure out top where trapframe should end, leaving 1 word scratch space
+	if (tf->tf_esp >= UXSTACKTOP-PGSIZE && tf->tf_esp <= UXSTACKTOP-1) {
+		exstack = tf->tf_esp - 4; 
+	} else {
+		exstack = UXSTACKTOP;
+	}
+
+	// Check if enough space to copy trapframe
+	if ((exstack - sizeof(struct UTrapframe)) < UXSTACKTOP-PGSIZE) {
+		cprintf("[%08x] user fault by stack", curenv->env_id);
+		goto userfault;
+	}
+
+	// reference: inc/trap.h: 59 ~ 86
+	utf = (struct UTrapframe *) (exstack - sizeof(struct UTrapframe));
+	utf->utf_fault_va = fault_va;
+	utf->utf_err = tf->tf_err;
+	utf->utf_regs = tf->tf_regs;
+	utf->utf_eip = tf->tf_eip;
+	utf->utf_eflags = tf->tf_eflags;
+	utf->utf_esp = tf->tf_esp;
+
+	tf->tf_esp = (uintptr_t) utf;
+	tf->tf_eip = (uintptr_t) curenv->env_pgfault_upcall;
+
+	env_run(curenv);
+
+	panic("should not be here!\n");
+		
 userfault:
 	// Destroy the environment that caused the fault.
 	cprintf("[%08x] user fault va %08x ip %08x\n",
 		curenv->env_id, fault_va, tf->tf_eip);
 	print_trapframe(tf);
-
-	user_mem_assert(curenv, (void*)fault_va, 1, PTE_U | PTE_P);
-
 	env_destroy(curenv);
 }
 
